@@ -96,15 +96,45 @@ class CausalSelfAttention(nn.Module):
         return y
 
 
+class sWELU(nn.Module):
+    """Smooth Weibull Exponential Linear Unit — brevet INPI FR2513029 (Paul OBARA, BCUB3).
+
+    sWELU(x) = x · σ(β·x) + λ · (1 - exp(-(|x|/λ)^k)) · (1 - σ(β·x)) · sign(x)
+
+    Branche positive : x · σ(β·x) → Swish-like, identité linéaire pour x>>0.
+    Branche négative : -λ · (1 - exp(-(|x|/λ)^k)) · (1 - σ(β·x)) → asymptotique bornée à -λ.
+    Paramètres (k, λ, β) appris par l'optimiseur (3 scalaires extra par couche MLP).
+
+    Vs squared ReLU baseline : gradient non-nul x<0, différentiable partout, paramétrable.
+    """
+
+    def __init__(self, k_init: float = 1.5, lambda_init: float = 1.0, beta_init: float = 1.0):
+        super().__init__()
+        self.k = nn.Parameter(torch.tensor(float(k_init)))
+        self.log_lambda = nn.Parameter(torch.log(torch.tensor(float(lambda_init))))
+        self.beta = nn.Parameter(torch.tensor(float(beta_init)))
+
+    def forward(self, x):
+        lam = torch.exp(self.log_lambda)
+        gate = torch.sigmoid(self.beta * x)
+        abs_x = torch.abs(x)
+        weibull_neg = lam * (1.0 - torch.exp(-((abs_x / lam).clamp(min=1e-8)).pow(self.k.clamp(min=0.1))))
+        return x * gate - weibull_neg * (1.0 - gate)
+
+
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=False)
         self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=False)
+        # Patch 2026-05-11 — sWELU (FR2513029) replaces squared ReLU baseline.
+        # Per autoresearch/swelu-2026-05-11 branch. Reverts via git: replace `self.activation(x)`
+        # with `F.relu(x).square()` and remove the sWELU class.
+        self.activation = sWELU(k_init=1.5, lambda_init=1.0, beta_init=1.0)
 
     def forward(self, x):
         x = self.c_fc(x)
-        x = F.relu(x).square()
+        x = self.activation(x)
         x = self.c_proj(x)
         return x
 
