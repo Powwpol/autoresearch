@@ -2,9 +2,18 @@
 One-time data preparation for autoresearch experiments.
 Downloads data shards and trains a BPE tokenizer.
 
+Two corpus modes:
+    - default: download climbmix-400b-shuffle parquet shards from HF.
+    - jsonl  : read pre-staged JSONL files (one {"text": "..."} per line) from
+      $AUTORESEARCH_JSONL_DIR. Set this env var BEFORE running prepare/train,
+      e.g. AUTORESEARCH_JSONL_DIR=/workspace/data/swelu_corpus.
+      Expected files: train.jsonl + val.jsonl. Tokenizer is still trained on
+      the train split (BPE 8192 vocab tuned to *our* token distribution).
+
 Usage:
     python prepare.py                  # full prep (download + tokenizer)
     python prepare.py --num-shards 8   # download only 8 shards (for testing)
+    AUTORESEARCH_JSONL_DIR=/path python prepare.py  # use jsonl corpus
 
 Data and tokenizer are stored in ~/.cache/autoresearch/.
 """
@@ -13,6 +22,7 @@ import os
 import sys
 import time
 import math
+import json
 import argparse
 import pickle
 from multiprocessing import Pool
@@ -43,6 +53,17 @@ MAX_SHARD = 6542 # the last datashard is shard_06542.parquet
 VAL_SHARD = MAX_SHARD  # pinned validation shard (shard_06542)
 VAL_FILENAME = f"shard_{VAL_SHARD:05d}.parquet"
 VOCAB_SIZE = 8192
+
+# JSONL corpus mode (pivot 2026-05-13 vers nika_vault Qdrant). Si défini,
+# court-circuite le download HF parquet et lit train.jsonl + val.jsonl.
+JSONL_DIR = os.environ.get("AUTORESEARCH_JSONL_DIR", "").strip() or None
+JSONL_MODE = JSONL_DIR is not None
+if JSONL_MODE:
+    JSONL_TRAIN_PATH = os.path.join(JSONL_DIR, "train.jsonl")
+    JSONL_VAL_PATH = os.path.join(JSONL_DIR, "val.jsonl")
+else:
+    JSONL_TRAIN_PATH = None
+    JSONL_VAL_PATH = None
 
 # BPE split pattern (GPT-4 style, with \p{N}{1,2} instead of {1,3})
 SPLIT_PATTERN = r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
@@ -117,13 +138,44 @@ def download_data(num_shards, download_workers=8):
 # ---------------------------------------------------------------------------
 
 def list_parquet_files():
-    """Return sorted list of parquet file paths in the data directory."""
+    """Return sorted list of parquet file paths in the data directory.
+
+    En mode JSONL, retourne une liste vide (les shards parquet ne sont pas utilisés)."""
+    if JSONL_MODE:
+        return []
+    if not os.path.isdir(DATA_DIR):
+        return []
     files = sorted(f for f in os.listdir(DATA_DIR) if f.endswith(".parquet") and not f.endswith(".tmp"))
     return [os.path.join(DATA_DIR, f) for f in files]
 
 
+def _iter_jsonl_texts(path):
+    """Lazy generator sur un fichier JSONL : yield obj['text'] strippé."""
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            t = obj.get("text")
+            if isinstance(t, str) and t:
+                yield t
+
+
 def text_iterator(max_chars=1_000_000_000, doc_cap=10_000):
     """Yield documents from training split (all shards except pinned val shard)."""
+    if JSONL_MODE:
+        nchars = 0
+        for text in _iter_jsonl_texts(JSONL_TRAIN_PATH):
+            doc = text[:doc_cap] if len(text) > doc_cap else text
+            nchars += len(doc)
+            yield doc
+            if nchars >= max_chars:
+                return
+        return
     parquet_paths = [p for p in list_parquet_files() if not p.endswith(VAL_FILENAME)]
     nchars = 0
     for filepath in parquet_paths:
@@ -149,10 +201,15 @@ def train_tokenizer():
 
     os.makedirs(TOKENIZER_DIR, exist_ok=True)
 
-    parquet_files = list_parquet_files()
-    if len(parquet_files) < 2:
-        print("Tokenizer: need at least 2 data shards (1 train + 1 val). Download more data first.")
-        sys.exit(1)
+    if JSONL_MODE:
+        if not os.path.exists(JSONL_TRAIN_PATH) or not os.path.exists(JSONL_VAL_PATH):
+            print(f"Tokenizer: JSONL corpus missing in {JSONL_DIR}. Expected train.jsonl and val.jsonl.")
+            sys.exit(1)
+    else:
+        parquet_files = list_parquet_files()
+        if len(parquet_files) < 2:
+            print("Tokenizer: need at least 2 data shards (1 train + 1 val). Download more data first.")
+            sys.exit(1)
 
     # --- Train with rustbpe ---
     print("Tokenizer: training BPE tokenizer...")
@@ -252,7 +309,23 @@ def get_token_bytes(device="cpu"):
 
 
 def _document_batches(split, tokenizer_batch_size=128):
-    """Infinite iterator over document batches from parquet files."""
+    """Infinite iterator over document batches from parquet *or* jsonl corpus."""
+    if JSONL_MODE:
+        path = JSONL_TRAIN_PATH if split == "train" else JSONL_VAL_PATH
+        assert os.path.exists(path), f"JSONL corpus missing: {path}"
+        epoch = 1
+        while True:
+            batch = []
+            for text in _iter_jsonl_texts(path):
+                batch.append(text)
+                if len(batch) >= tokenizer_batch_size:
+                    yield batch, epoch
+                    batch = []
+            if batch:
+                yield batch, epoch
+            epoch += 1
+        return
+
     parquet_paths = list_parquet_files()
     assert len(parquet_paths) > 0, "No parquet files found. Run prepare.py first."
     val_path = os.path.join(DATA_DIR, VAL_FILENAME)
@@ -377,11 +450,14 @@ if __name__ == "__main__":
     num_shards = MAX_SHARD if args.num_shards == -1 else args.num_shards
 
     print(f"Cache directory: {CACHE_DIR}")
+    if JSONL_MODE:
+        print(f"JSONL corpus mode: {JSONL_DIR}")
     print()
 
-    # Step 1: Download data
-    download_data(num_shards, download_workers=args.download_workers)
-    print()
+    # Step 1: Download data (skip si JSONL_MODE)
+    if not JSONL_MODE:
+        download_data(num_shards, download_workers=args.download_workers)
+        print()
 
     # Step 2: Train tokenizer
     train_tokenizer()
