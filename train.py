@@ -115,10 +115,17 @@ class sWELU(nn.Module):
         self.beta = nn.Parameter(torch.tensor(float(beta_init)))
 
     def forward(self, x):
+        # Patch 2026-05-14 — gradient hygiene :
+        # - k borné par softplus (smooth lower bound, gradient continu partout)
+        #   au lieu de clamp(min=0.1) qui tuait le gradient sous 0.1
+        # - log_lambda libre (transformation exp = stable, gradient passe)
+        # - beta libre
+        # Tous les params restent nn.Parameter optimisés par AdamW via chain rule classique
         lam = torch.exp(self.log_lambda)
         gate = torch.sigmoid(self.beta * x)
         abs_x = torch.abs(x)
-        weibull_neg = lam * (1.0 - torch.exp(-((abs_x / lam).clamp(min=1e-8)).pow(self.k.clamp(min=0.1))))
+        k_eff = F.softplus(self.k) + 0.05  # smooth >= 0.05, gradient continu
+        weibull_neg = lam * (1.0 - torch.exp(-((abs_x / lam).clamp(min=1e-8)).pow(k_eff)))
         return x * gate - weibull_neg * (1.0 - gate)
 
 
@@ -634,6 +641,21 @@ while True:
     print(f"\rstep {step:05d} ({pct_done:.1f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt*1000:.0f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.1f}% | epoch: {epoch} | remaining: {remaining:.0f}s    ", end="", flush=True)
     if step % 50 == 0:
         print(f"\nval_bpb (step {step}): {debiased_smooth_loss:.6f}  (smooth training loss as proxy — final val_bpb logged after training loop)", flush=True)
+        # Patch 2026-05-14 — instrumentation chain rule sWELU
+        # Logger les valeurs ACTUELLES + grad norms des params (k, log_lambda, beta)
+        # par bloc transformer pour prouver auto-adaptation par backprop.
+        try:
+            for bi, block in enumerate(model.transformer.h):
+                act = block.mlp.activation
+                k_val = float(F.softplus(act.k).item() + 0.05)
+                lam_val = float(torch.exp(act.log_lambda).item())
+                beta_val = float(act.beta.item())
+                k_grad = float(act.k.grad.abs().item()) if act.k.grad is not None else 0.0
+                ll_grad = float(act.log_lambda.grad.abs().item()) if act.log_lambda.grad is not None else 0.0
+                b_grad = float(act.beta.grad.abs().item()) if act.beta.grad is not None else 0.0
+                print(f"swelu_param (step {step}, block {bi}): k={k_val:.3f} (|grad|={k_grad:.4f}) | lam={lam_val:.3f} (|grad|={ll_grad:.4f}) | beta={beta_val:.3f} (|grad|={b_grad:.4f})", flush=True)
+        except Exception as _e:
+            print(f"swelu_param log err: {_e}", flush=True)
 
     # GC management (Python's GC causes ~500ms stalls)
     if step == 0:
