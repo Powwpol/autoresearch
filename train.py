@@ -127,14 +127,14 @@ class MLP(nn.Module):
         super().__init__()
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=False)
         self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=False)
-        # Patch 2026-05-11 — sWELU (FR2513029) replaces squared ReLU baseline.
-        # Per autoresearch/swelu-2026-05-11 branch. Reverts via git: replace `self.activation(x)`
-        # with `F.relu(x).square()` and remove the sWELU class.
-        self.activation = sWELU(k_init=1.5, lambda_init=1.0, beta_init=1.0)
+        # Phase 2a BASELINE (2026-05-14) — revert to karpathy original squared ReLU
+        # for A/B comparison with sWELU branch (autoresearch/qdrant-corpus-2026-05-13).
+        # Same hyperparams, same corpus, same seed family → mesure delta val_bpb.
+        self.activation = None  # squared ReLU is inlined in forward
 
     def forward(self, x):
         x = self.c_fc(x)
-        x = self.activation(x)
+        x = F.relu(x).square()  # baseline ReLU²
         x = self.c_proj(x)
         return x
 
