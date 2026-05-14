@@ -128,9 +128,12 @@ class MLP(nn.Module):
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=False)
         self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=False)
         # Patch 2026-05-11 — sWELU (FR2513029) replaces squared ReLU baseline.
-        # Per autoresearch/swelu-2026-05-11 branch. Reverts via git: replace `self.activation(x)`
-        # with `F.relu(x).square()` and remove the sWELU class.
-        self.activation = sWELU(k_init=1.5, lambda_init=1.0, beta_init=1.0)
+        # Patch 2026-05-14 — init paramétrable via env vars SWELU_K / SWELU_LAMBDA / SWELU_BETA
+        # pour Taguchi L9 sweep (Phase 2b). Defaults conservés pour compat.
+        _k = float(os.environ.get("SWELU_K", "1.5"))
+        _lam = float(os.environ.get("SWELU_LAMBDA", "1.0"))
+        _beta = float(os.environ.get("SWELU_BETA", "1.0"))
+        self.activation = sWELU(k_init=_k, lambda_init=_lam, beta_init=_beta)
 
     def forward(self, x):
         x = self.c_fc(x)
