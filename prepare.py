@@ -56,7 +56,7 @@ VAL_SHARD = MAX_SHARD  # pinned validation shard (shard_06542)
 VAL_FILENAME = f"shard_{VAL_SHARD:05d}.parquet"
 VOCAB_SIZE = 8192
 
-# JSONL corpus mode (pivot 2026-05-13 vers nika_vault Qdrant). Si défini,
+# JSONL corpus mode (private corpus pivot). Si défini,
 # court-circuite le download HF parquet et lit train.jsonl + val.jsonl.
 JSONL_DIR = os.environ.get("AUTORESEARCH_JSONL_DIR", "").strip() or None
 JSONL_MODE = JSONL_DIR is not None

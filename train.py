@@ -97,7 +97,7 @@ class CausalSelfAttention(nn.Module):
 
 
 class sWELU(nn.Module):
-    """Smooth Weibull Exponential Linear Unit — brevet INPI FR2513029 (Paul OBARA, BCUB3).
+    """Smooth Weibull Exponential Linear Unit — patent INPI FR2513029 (Paul OBARA).
 
     sWELU(x) = x · σ(β·x) + λ · (1 - exp(-(|x|/λ)^k)) · (1 - σ(β·x)) · sign(x)
 
