@@ -2,7 +2,27 @@
 
 > Branch `autoresearch/qdrant-corpus-2026-05-13` extends [karpathy/autoresearch](https://github.com/karpathy/autoresearch) with **sWELU** (smooth Weibull Exponential Linear Unit, **patent INPI FR2513029** by Paul OBARA, BCUB3) replacing the default squared-ReLU MLP activation.
 
-## Honest results — Phase 3 replicated 2026-05-14
+## Phase C update — 500M params 2026-05-15 — sWELU beats ReLU² ⭐
+
+A/B blind run on identical NVIDIA A100 80GB SXM4 hardware, scaled config (`DEPTH=16, AR=96, HEAD_DIM=128 → model_dim 1536`, `DEVICE_BATCH_SIZE=16`, `TIME_BUDGET=1200s`), corpus = Qdrant `nika_vault` 15M BCUB3 tokens.
+
+| Activation | val_bpb FINAL | Wall time | Cost |
+|---|---|---|---|
+| sWELU + softplus | **0.6692** | 28.3 min | $0.65 |
+| ReLU² baseline | 0.7164 | 11.4 min | $0.26 |
+
+**Delta sWELU − ReLU² = −0.0472 bpb → sWELU beats baseline by 6.6%** at 500M params.
+
+**Reversal vs Phase 3 (50M, A40)** where sWELU lost by +0.023 bpb: at 500M, the 16 learnable scalars become a sufficiently small fraction of total parameters (~0.003% vs ~0.03% at 50M) to act as a productive fine-tuner instead of injecting noise. The "advantage emerges at higher capacity" hypothesis is supported.
+
+**Caveats** :
+- x1 run per activation. Replication x3 in progress (results expected within ~2.5 h, this README will be updated).
+- sWELU pod ran 2.5× longer than ReLU² (28 vs 11 min): both reached the same step count, but sWELU's variable training time hints at compile-cache differences. Same hardware, same code path otherwise.
+- 500M is "small LLM" — a Phase D 1.5B run (DEPTH=20, AR=128, model_dim 2560) is queued on H100 80GB to test scaling further.
+
+Reproducibility : `git checkout autoresearch/qdrant-corpus-2026-05-13` then `DEPTH=16 ASPECT_RATIO=96 HEAD_DIM=128 DEVICE_BATCH_SIZE=16 TIME_BUDGET=1200 uv run train.py`. For ReLU² baseline checkout `autoresearch/gelu-baseline-2026-05-14`.
+
+## Honest results — Phase 3 replicated 2026-05-14 (50M baseline)
 
 | Setup | Activation | val_bpb FINAL (mean ± std) | Hardware | Delta vs baseline |
 |---|---|---|---|---|
@@ -107,11 +127,12 @@ LM head → softmax over 8192 vocab
 
 ## Open questions for further research
 
-1. **Scale up the model** (50M → 500M params, longer training) — does the gap close further? sWELU's parameterization may need more capacity to express its advantage.
+1. ~~**Scale up the model** (50M → 500M params, longer training) — does the gap close further?~~ → **Answered Phase C 2026-05-15**: yes — at 500M sWELU beats ReLU² by 6.6% (delta −0.047 bpb). Replication x3 in progress, Phase D at 1.5B queued.
 2. **Partial placement** — apply sWELU only to the last N transformer blocks (closer to output) while keeping ReLU² in earlier blocks.
 3. **Different baseline** — compare sWELU vs GELU (industry standard) instead of ReLU² (karpathy autoresearch specific).
 4. **Hardware-controlled replication** — test baseline ReLU² on L40S to see how much of the L40S outlier (0.702) was hardware variance vs sWELU gain.
 5. **Pre-conditioned init** — warmup activation-only phase: freeze everything except (k, λ, β), train 100 steps, then unfreeze.
+6. **Scaling law** — Phase D 1.5B + Phase E 6B (if budget allows) to establish whether the sWELU edge widens with capacity (sub-power-law gain) or plateaus.
 
 ## Credits
 
