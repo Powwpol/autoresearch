@@ -699,3 +699,25 @@ print(f"total_tokens_M:   {total_tokens / 1e6:.1f}")
 print(f"num_steps:        {step}")
 print(f"num_params_M:     {num_params / 1e6:.1f}")
 print(f"depth:            {DEPTH}")
+
+# Phase E — checkpoint save for instruction-tuning downstream
+SAVE_CHECKPOINT = os.environ.get("SAVE_CHECKPOINT", "0") == "1"
+if SAVE_CHECKPOINT:
+    ckpt_path = os.environ.get("CHECKPOINT_PATH", "/workspace/model_checkpoint.pt")
+    print(f"\nSaving checkpoint → {ckpt_path}")
+    torch.save({
+        "model_state_dict": model.state_dict(),
+        "config": {
+            "depth": DEPTH,
+            "aspect_ratio": ASPECT_RATIO,
+            "head_dim": HEAD_DIM,
+            "num_params": num_params,
+            "vocab_size": VOCAB_SIZE,
+            "val_bpb_final": val_bpb,
+        },
+        "step": step,
+        "total_tokens": total_tokens,
+    }, ckpt_path)
+    import os as _os
+    print(f"checkpoint_size_mb: {_os.path.getsize(ckpt_path) / 1024 / 1024:.1f}")
+    print(f"checkpoint_saved:  True")
