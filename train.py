@@ -478,9 +478,10 @@ class MuonAdamW(torch.optim.Optimizer):
 # ---------------------------------------------------------------------------
 
 # Model architecture
-ASPECT_RATIO = 64       # model_dim = depth * ASPECT_RATIO
-HEAD_DIM = 128          # target head dimension for attention
-WINDOW_PATTERN = "SSSL" # sliding window pattern: L=full, S=half context
+# Phase C 2026-05-15 — env-overridable scale knobs for 500M-params test on A100 80GB
+ASPECT_RATIO = int(os.environ.get("ASPECT_RATIO", "64"))    # model_dim = depth * ASPECT_RATIO
+HEAD_DIM = int(os.environ.get("HEAD_DIM", "128"))           # target head dimension for attention
+WINDOW_PATTERN = os.environ.get("WINDOW_PATTERN", "SSSL")   # sliding window pattern: L=full, S=half context
 
 # Optimization
 TOTAL_BATCH_SIZE = 2**19 # ~524K tokens per optimizer step
@@ -494,9 +495,11 @@ WARMUP_RATIO = 0.0      # fraction of time budget for LR warmup
 WARMDOWN_RATIO = 0.5    # fraction of time budget for LR warmdown
 FINAL_LR_FRAC = 0.0     # final LR as fraction of initial
 
-# Model size
-DEPTH = 8               # number of transformer layers
-DEVICE_BATCH_SIZE = int(os.environ.get("DEVICE_BATCH_SIZE", "64"))  # OOM-safe default; A40 48GB OK at 128
+# Model size — Phase C 2026-05-15 env-overridable for 500M test
+# Targets: small (DEPTH=8, AR=64 → ~50M), medium (DEPTH=16, AR=96 → ~180M),
+#          large (DEPTH=24, AR=128 → ~480M on A100 80GB)
+DEPTH = int(os.environ.get("DEPTH", "8"))
+DEVICE_BATCH_SIZE = int(os.environ.get("DEVICE_BATCH_SIZE", "64"))  # OOM-safe default
 
 # ---------------------------------------------------------------------------
 # Setup: tokenizer, model, optimizer, dataloader

@@ -37,8 +37,10 @@ import torch
 # Constants (fixed, do not modify)
 # ---------------------------------------------------------------------------
 
-MAX_SEQ_LEN = 2048       # context length
-TIME_BUDGET = 300        # training time budget in seconds (5 minutes)
+import os as _os_for_env
+MAX_SEQ_LEN = int(_os_for_env.environ.get("MAX_SEQ_LEN", "2048"))   # context length
+# Phase C 2026-05-15 — env-overridable budget for big-model 500M params A100 80GB
+TIME_BUDGET = int(_os_for_env.environ.get("TIME_BUDGET", "300"))    # training time budget in seconds
 EVAL_TOKENS = 40 * 524288  # number of tokens for val eval
 
 # ---------------------------------------------------------------------------
