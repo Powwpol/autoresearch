@@ -1,10 +1,10 @@
-# Autoresearch × sWELU — BCUB3 fork
+# Autoresearch × sWELU — public research fork
 
-> Branch `autoresearch/qdrant-corpus-2026-05-13` extends [karpathy/autoresearch](https://github.com/karpathy/autoresearch) with **sWELU** (smooth Weibull Exponential Linear Unit, **patent INPI FR2513029** by Paul OBARA, BCUB3) replacing the default squared-ReLU MLP activation.
+> This fork extends [karpathy/autoresearch](https://github.com/karpathy/autoresearch) with **sWELU** (smooth Weibull Exponential Linear Unit, **patent INPI FR2513029** by Paul OBARA) replacing the default squared-ReLU MLP activation.
 
 ## Phase C update — 500M params 2026-05-15 — sWELU beats ReLU² ⭐
 
-A/B blind run on identical NVIDIA A100 80GB SXM4 hardware, scaled config (`DEPTH=16, AR=96, HEAD_DIM=128 → model_dim 1536`, `DEVICE_BATCH_SIZE=16`, `TIME_BUDGET=1200s`), corpus = Qdrant `nika_vault` 15M BCUB3 tokens.
+A/B blind run on identical NVIDIA A100 80GB SXM4 hardware, scaled config (`DEPTH=16, AR=96, HEAD_DIM=128 → model_dim 1536`, `DEVICE_BATCH_SIZE=16`, `TIME_BUDGET=1200s`), trained on a private 15M-token corpus.
 
 | Activation | val_bpb FINAL | Wall time | Cost |
 |---|---|---|---|
@@ -39,7 +39,7 @@ Total replication cost : $2.57.
 
 → **Phase C verdict confirmed statistically**. The sWELU advantage at 500M params is **real and reproducible**, not hardware luck.
 
-Reproducibility : `git checkout autoresearch/qdrant-corpus-2026-05-13` then `DEPTH=16 ASPECT_RATIO=96 HEAD_DIM=128 DEVICE_BATCH_SIZE=16 TIME_BUDGET=1200 uv run train.py`. For ReLU² baseline checkout `autoresearch/gelu-baseline-2026-05-14`.
+Reproducibility : `git checkout autoresearch/swelu-main` then `DEPTH=16 ASPECT_RATIO=96 HEAD_DIM=128 DEVICE_BATCH_SIZE=16 TIME_BUDGET=1200 uv run train.py`. For ReLU² baseline checkout `autoresearch/gelu-baseline-2026-05-14`. Bring your own corpus via `prepare.py` JSONL mode.
 
 ## Honest results — Phase 3 replicated 2026-05-14 (50M baseline)
 
@@ -102,7 +102,7 @@ If `|grad|` stays near zero for many steps, the chain rule is broken somewhere u
 
 ## Patent FR2513029
 
-sWELU is filed at INPI (France) under patent number FR2513029 by Paul OBARA, BCUB3. The patent claim covers the activation form and the property that its parameters are learnable end-to-end via backpropagation.
+sWELU is filed at INPI (France) under patent number FR2513029 by Paul OBARA. The patent claim covers the activation form and the property that its parameters are learnable end-to-end via backpropagation.
 
 This public fork is provided as scientific reproducibility material. Commercial use of sWELU in production systems requires patent licensing — contact info@bcub3.com.
 
@@ -111,7 +111,7 @@ This public fork is provided as scientific reproducibility material. Commercial 
 ```bash
 git clone https://github.com/Powwpol/autoresearch
 cd autoresearch
-git checkout autoresearch/qdrant-corpus-2026-05-13
+git checkout autoresearch/swelu-main
 
 # Prepare tokenizer + corpus (your JSONL files in /workspace/corpus/)
 uv run prepare.py
@@ -156,7 +156,7 @@ LM head → softmax over 8192 vocab
 ## Credits
 
 - **karpathy/autoresearch** — base agent framework + nanochat-derived training script
-- **BCUB3 R&D** (Paul OBARA + Nika OS) — sWELU patch, gradient hygiene fix, Phase 1-3 experiments
+- **Paul OBARA** — sWELU patch, gradient hygiene fix, Phase 1-3 experiments
 - **INPI FR2513029** — patent filing covering sWELU
 
 ## License
