@@ -721,3 +721,46 @@ if SAVE_CHECKPOINT:
     import os as _os
     print(f"checkpoint_size_mb: {_os.path.getsize(ckpt_path) / 1024 / 1024:.1f}")
     print(f"checkpoint_saved:  True")
+
+    # W&B Artifact upload — persistent storage that survives pod termination
+    WANDB_UPLOAD = os.environ.get("WANDB_UPLOAD", "0") == "1"
+    if WANDB_UPLOAD:
+        try:
+            import wandb
+            wandb_project = os.environ.get("WANDB_PROJECT", "swelu")
+            wandb_entity = os.environ.get("WANDB_ENTITY", "paul-obara-bcbub3")
+            wandb_run_name = os.environ.get("WANDB_RUN_NAME", _os.environ.get("RUN_ID", "swelu_run"))
+            print(f"\n[wandb] init project={wandb_project} entity={wandb_entity} run={wandb_run_name}")
+            wandb.init(
+                project=wandb_project,
+                entity=wandb_entity,
+                name=wandb_run_name,
+                config={
+                    "depth": DEPTH,
+                    "aspect_ratio": ASPECT_RATIO,
+                    "head_dim": HEAD_DIM,
+                    "num_params": num_params,
+                    "vocab_size": VOCAB_SIZE,
+                    "val_bpb_final": val_bpb,
+                    "step": step,
+                    "total_tokens": total_tokens,
+                    "swelu_k": os.environ.get("SWELU_K", ""),
+                    "swelu_lambda": os.environ.get("SWELU_LAMBDA", ""),
+                    "swelu_beta": os.environ.get("SWELU_BETA", ""),
+                },
+            )
+            wandb.summary["val_bpb_final"] = val_bpb
+            wandb.summary["num_params"] = num_params
+            wandb.summary["total_tokens"] = total_tokens
+            artifact_name = f"swelu_{int(num_params/1e6)}M_initC"
+            artifact = wandb.Artifact(name=artifact_name, type="model",
+                                       description=f"sWELU {int(num_params/1e6)}M params, val_bpb={val_bpb:.4f}")
+            artifact.add_file(ckpt_path, name=_os.path.basename(ckpt_path))
+            wandb.log_artifact(artifact)
+            print(f"[wandb] uploading artifact {artifact_name}...")
+            artifact.wait()
+            print(f"[wandb] artifact uploaded ✓ (run: {wandb.run.url})")
+            wandb.finish()
+        except Exception as e:
+            print(f"[wandb] upload FAIL: {e}")
+            import traceback; traceback.print_exc()
