@@ -506,8 +506,12 @@ DEVICE_BATCH_SIZE = int(os.environ.get("DEVICE_BATCH_SIZE", "64"))  # OOM-safe d
 # ---------------------------------------------------------------------------
 
 t_start = time.time()
-torch.manual_seed(42)
-torch.cuda.manual_seed(42)
+SEED = int(os.environ.get("SEED", "42"))
+print(f"seed:             {SEED}")
+torch.manual_seed(SEED)
+torch.cuda.manual_seed(SEED)
+import random as _random
+_random.seed(SEED)
 torch.set_float32_matmul_precision("high")
 device = torch.device("cuda")
 autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
