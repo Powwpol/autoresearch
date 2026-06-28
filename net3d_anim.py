@@ -231,11 +231,15 @@ def make_animation(data, out_dir):
     anim = animation.FuncAnimation(fig, draw, frames=n_frames, blit=False, interval=80)
     out = Path(out_dir) / "kwt_net3d_gpt.mp4"
     out.parent.mkdir(parents=True, exist_ok=True)
-    writer = animation.FFMpegWriter(fps=12, bitrate=2400,
-        extra_args=["-pix_fmt", "yuv420p", "-profile:v", "baseline",
-                    "-movflags", "+faststart",
-                    "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2"])
-    anim.save(str(out), writer=writer)
+    try:
+        from bcub3_brand import save_anim as _save_anim
+        _save_anim(anim, str(out), fps=7, end_hold_s=2.0)
+    except Exception:
+        writer = animation.FFMpegWriter(fps=7, bitrate=2400,
+            extra_args=["-pix_fmt", "yuv420p", "-profile:v", "baseline",
+                        "-movflags", "+faststart",
+                        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2"])
+        anim.save(str(out), writer=writer)
     print(f"VIDEO -> {out}")
     plt.close(fig)
     return str(out)

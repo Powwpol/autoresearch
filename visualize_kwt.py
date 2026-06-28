@@ -179,11 +179,15 @@ def make_video(results: dict, out_dir: str) -> str:
         fig, animate, init_func=init, frames=n_frames, blit=True, interval=80
     )
     out = Path(out_dir) / "kwt_training.mp4"
-    writer = animation.FFMpegWriter(fps=12, bitrate=2400,
-        extra_args=["-pix_fmt", "yuv420p", "-profile:v", "baseline",
-                    "-movflags", "+faststart",
-                    "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2"])
-    anim.save(str(out), writer=writer)
+    try:
+        from bcub3_brand import save_anim as _save_anim
+        _save_anim(anim, str(out), fps=7, end_hold_s=2.0)
+    except Exception:
+        writer = animation.FFMpegWriter(fps=7, bitrate=2400,
+            extra_args=["-pix_fmt", "yuv420p", "-profile:v", "baseline",
+                        "-movflags", "+faststart",
+                        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2"])
+        anim.save(str(out), writer=writer)
     plt.close(fig)
     print(f"[video] saved → {out}")
     return str(out)
