@@ -342,7 +342,8 @@ def main():
         return
 
     for ck, runs in data.items():
-        print(f"  {ck}: {len(runs)} runs  rewards={[f'{r['rl_final_reward']:.4f}' for r in runs]}")
+        rewards_str = [f"{r['rl_final_reward']:.4f}" for r in runs]
+        print(f"  {ck}: {len(runs)} runs  rewards={rewards_str}")
 
     make_summary_plot(data, args.out)
     make_curves_plot(data,  args.out)
