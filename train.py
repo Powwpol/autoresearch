@@ -474,6 +474,86 @@ class MuonAdamW(torch.optim.Optimizer):
                 self._step_muon(group)
 
 # ---------------------------------------------------------------------------
+# KWT — Kelly-Weibull-Taguchi LR scale (couche ADDITIVE inter-batch)
+# IP interne BCUB3/POWWPOL — NE PAS DIFFUSER (conf. IMMUTABLE §6).
+# Spec figée : KWT-DRIFT-BENCH-ENRICH/RAPPORT.md · uid6 39aa5d
+# ---------------------------------------------------------------------------
+
+import numpy as _np
+
+class KWTAdaptiveLR:
+    """Couche additive sur Muon/AdamW : scale LR = 1.0 + f*.
+    f* ∈ [0, κ=0.5] selon Kelly-Weibull-Taguchi.  Cold-start → scale=1.0.
+    """
+    N_WINDOW   = 50
+    REFIT_EVERY = 15
+    KAPPA       = 0.5   # half-Kelly
+    RELIABILITY = 0.76  # (1−α)(1−β) reliability cap
+
+    def __init__(self):
+        self._window = []
+        self._step   = 0
+        self._k      = 1.0
+        self._lam    = 1.0
+        self.last_f_star = 0.0
+        self.last_scale  = 1.0
+
+    # -- Weibull 2-param via Weibull probability plot (log-linear regression) --
+    def _refit(self):
+        data = _np.array(self._window, dtype=_np.float64)
+        data = _np.maximum(data, 1e-8)
+        n    = len(data)
+        ds   = _np.sort(data)
+        idx  = _np.arange(1, n + 1, dtype=_np.float64)
+        F    = _np.clip((idx - 0.3) / (n + 0.4), 1e-8, 1 - 1e-8)  # Benard
+        Y    = _np.log(-_np.log(1.0 - F))                           # ln(-ln(1-F))
+        X    = _np.log(ds)
+        Xm, Ym = X.mean(), Y.mean()
+        sxx  = float(((X - Xm) ** 2).sum())
+        sxy  = float(((X - Xm) * (Y - Ym)).sum())
+        if sxx < 1e-12:
+            return
+        k   = max(0.1, sxy / sxx)
+        lam = max(1e-8, float(_np.exp(-(Ym - k * Xm) / k)))
+        self._k, self._lam = k, lam
+
+    def _cdf(self, x: float) -> float:
+        import math
+        return 1.0 - math.exp(-(max(x, 1e-8) / self._lam) ** self._k)
+
+    def update(self, loss_val: float) -> float:
+        import math
+        self._window.append(float(loss_val))
+        if len(self._window) > self.N_WINDOW:
+            self._window.pop(0)
+        self._step += 1
+        # Cold-start guard — wait for minimal history
+        if len(self._window) < 10:
+            self.last_f_star = 0.0
+            self.last_scale  = 1.0
+            return 1.0
+        # Periodic Weibull refit
+        if self._step % self.REFIT_EVERY == 0:
+            self._refit()
+        # p_weibull = P(X ≤ loss_current) — high ↔ current loss is abnormally high
+        p_wb = self._cdf(loss_val)
+        p    = p_wb * self.RELIABILITY
+        # Taguchi STB signal-to-noise ratio
+        win   = self._window
+        delta = sum(win) / len(win)
+        sigma = (sum((x - delta) ** 2 for x in win) / len(win)) ** 0.5
+        b     = delta / (delta + sigma + 1e-8)
+        # Kelly fraction (k annule, full-Kelly on b, then half-Kelly κ)
+        q      = 1.0 - p
+        f_raw  = (p * b - q) / (b + 1e-8)
+        f_star = max(0.0, min(f_raw * self.KAPPA, 1.0))
+        scale  = 1.0 + f_star
+        self.last_f_star = f_star
+        self.last_scale  = scale
+        return scale
+
+
+# ---------------------------------------------------------------------------
 # Hyperparameters (edit these directly, no CLI flags needed)
 # ---------------------------------------------------------------------------
 
@@ -494,6 +574,10 @@ ADAM_BETAS = (0.8, 0.95) # Adam beta1, beta2
 WARMUP_RATIO = 0.0      # fraction of time budget for LR warmup
 WARMDOWN_RATIO = 0.5    # fraction of time budget for LR warmdown
 FINAL_LR_FRAC = 0.0     # final LR as fraction of initial
+
+# KWT additive layer — disabled by default
+KWT_ENABLED  = os.environ.get("KWT_ENABLED", "0") == "1"
+KWT_LOG_PATH = os.environ.get("KWT_LOG_PATH", "")  # optional JSONL trace path
 
 # Model size — Phase C 2026-05-15 env-overridable for 500M test
 # Targets: small (DEPTH=8, AR=64 → ~50M), medium (DEPTH=16, AR=96 → ~180M),
@@ -562,6 +646,12 @@ optimizer = model.setup_optimizer(
 
 model = torch.compile(model, dynamic=False)
 
+# KWT controller (instantiated even when disabled so the variable always exists)
+kwt_controller = KWTAdaptiveLR()
+_kwt_log_fh    = open(KWT_LOG_PATH, "w") if KWT_ENABLED and KWT_LOG_PATH else None
+if KWT_ENABLED:
+    print(f"KWT_ENABLED=1  N_WINDOW={kwt_controller.N_WINDOW}  REFIT_EVERY={kwt_controller.REFIT_EVERY}  kappa={kwt_controller.KAPPA}")
+
 train_loader = make_dataloader(tokenizer, DEVICE_BATCH_SIZE, MAX_SEQ_LEN, "train")
 x, y, epoch = next(train_loader)  # prefetch first batch
 
@@ -616,10 +706,18 @@ while True:
         if group['kind'] == 'muon':
             group["momentum"] = muon_momentum
             group["weight_decay"] = muon_weight_decay
-    optimizer.step()
-    model.zero_grad(set_to_none=True)
 
     train_loss_f = train_loss.item()
+
+    # KWT additive LR scale — applied after base schedule, never below 1.0
+    if KWT_ENABLED:
+        kwt_scale = kwt_controller.update(train_loss_f)
+        if kwt_scale > 1.0:
+            for group in optimizer.param_groups:
+                group["lr"] *= kwt_scale
+
+    optimizer.step()
+    model.zero_grad(set_to_none=True)
 
     # Fast fail: abort if loss is exploding or NaN
     if math.isnan(train_loss_f) or train_loss_f > 100:
@@ -648,6 +746,16 @@ while True:
     print(f"\rstep {step:05d} ({pct_done:.1f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt*1000:.0f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.1f}% | epoch: {epoch} | remaining: {remaining:.0f}s    ", end="", flush=True)
     if step % 50 == 0:
         print(f"\nval_bpb (step {step}): {debiased_smooth_loss:.6f}  (smooth training loss as proxy — final val_bpb logged after training loop)", flush=True)
+        if KWT_ENABLED:
+            print(f"kwt (step {step}): scale={kwt_controller.last_scale:.4f}  f*={kwt_controller.last_f_star:.4f}  k={kwt_controller._k:.3f}  lam={kwt_controller._lam:.3f}", flush=True)
+        if _kwt_log_fh is not None:
+            import json as _json
+            _kwt_log_fh.write(_json.dumps({
+                "step": step, "loss": train_loss_f,
+                "lrm": lrm, "kwt_scale": kwt_controller.last_scale if KWT_ENABLED else 1.0,
+                "f_star": kwt_controller.last_f_star if KWT_ENABLED else 0.0,
+            }) + "\n")
+            _kwt_log_fh.flush()
         # Patch 2026-05-14 — instrumentation chain rule sWELU
         # Logger les valeurs ACTUELLES + grad norms des params (k, log_lambda, beta)
         # par bloc transformer pour prouver auto-adaptation par backprop.
@@ -679,6 +787,8 @@ while True:
         break
 
 print()  # newline after \r training log
+if _kwt_log_fh is not None:
+    _kwt_log_fh.close()
 
 total_tokens = step * TOTAL_BATCH_SIZE
 
