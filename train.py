@@ -17,11 +17,17 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from kernels import get_kernel
-cap = torch.cuda.get_device_capability()
-# varunneal's FA3 is Hopper only, use kernels-community on non-Hopper GPUs
-repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
-fa3 = get_kernel(repo, trust_remote_code=True).flash_attn_interface
+try:
+    from kernels import get_kernel
+    _cap = torch.cuda.get_device_capability()
+    _repo = "varunneal/flash-attention-3" if _cap == (9, 0) else "kernels-community/flash-attn3"
+    fa3 = get_kernel(_repo, trust_remote_code=True, revision="main").flash_attn_interface
+    _USE_FA3 = True
+    print(f"[info] FA3 loaded from {_repo} revision=main")
+except Exception as _e:
+    print(f"[warn] FA3 unavailable ({type(_e).__name__}: {_e}) — using torch SDPA")
+    fa3 = None
+    _USE_FA3 = False
 
 from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, make_dataloader, evaluate_bpb
 
@@ -90,7 +96,12 @@ class CausalSelfAttention(nn.Module):
         q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
         q, k = norm(q), norm(k)
 
-        y = fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
+        if _USE_FA3:
+            y = fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
+        else:
+            # SDPA fallback: (B,T,nh,hd) → (B,nh,T,hd) layout
+            q_, k_, v_ = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+            y = F.scaled_dot_product_attention(q_, k_, v_, is_causal=True).transpose(1, 2)
         y = y.contiguous().view(B, T, -1)
         y = self.c_proj(y)
         return y
