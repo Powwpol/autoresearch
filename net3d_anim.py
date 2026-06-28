@@ -13,7 +13,7 @@ Utilisation :
 
 CONFIDENTIEL — KWT = IP interne BCUB3/POWWPOL. NE PAS DIFFUSER.
 """
-import argparse, json, math
+import argparse, json, math, sys
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
@@ -22,19 +22,32 @@ import matplotlib.animation as animation
 from mpl_toolkits.mplot3d import Axes3D  # noqa
 from pathlib import Path
 
+sys.path.insert(0, "/home/nika/vault/scripts")
+try:
+    from bcub3_brand import apply_bcub3_style, brand_axes, add_brand_header, C as _C, SERIES as _SERIES
+    apply_bcub3_style()
+    C_BASE   = _C["teal_deep"]    # #5E9384
+    C_KWT    = _C["coral_deep"]   # #C97A55
+    C_SCALE  = _C["signal"]       # #15803D
+    C_BG     = _C["cream"]        # #FDFBF8
+    C_NEURON = _C["anthracite"]   # #2C3E42
+    C_EDGE   = _C["gray_mid"]     # mid-gray
+    C_ACTIVE = _C["coral_deep"]   # same as KWT for active layer burst
+    _BRAND   = True
+except ImportError:
+    _BRAND   = False
+    C_BG     = "#0d1117"
+    C_BASE   = "#4c72b0"
+    C_KWT    = "#dd8452"
+    C_SCALE  = "#55a868"
+    C_NEURON = "#c9d1d9"
+    C_EDGE   = "#30363d"
+    C_ACTIVE = "#f79300"
+
 # ── Architecture nanochat-GPT ─────────────────────────────────────────────────
 N_LAYER = 12
 N_HEAD  = 6
 N_EMBD  = 768
-
-# ── Couleurs charte ─────────────────────────────────────────────────────────
-C_BG      = "#0d1117"
-C_BASE    = "#4c72b0"
-C_KWT     = "#dd8452"
-C_SCALE   = "#55a868"
-C_NEURON  = "#c9d1d9"
-C_EDGE    = "#30363d"
-C_ACTIVE  = "#f79300"
 
 # ── Build transformer 3D positions ──────────────────────────────────────────
 def make_transformer_positions():
@@ -112,46 +125,54 @@ def make_animation(data, out_dir):
     y_lo = min(all_losses) * 0.97 if all_losses else 0.9
     y_hi = max(all_losses) * 1.02 if all_losses else 1.1
 
-    fig = plt.figure(figsize=(14, 6), facecolor=C_BG)
-    fig.subplots_adjust(left=0.04, right=0.98, top=0.92, bottom=0.08, wspace=0.35)
+    txt_col = _C["anthracite"] if _BRAND else "#c9d1d9"
+    grid_col = _C["gray_mid"] if _BRAND else "#30363d"
+
+    fig = plt.figure(figsize=(14, 6.8), facecolor=C_BG)
+    fig.subplots_adjust(left=0.04, right=0.98, top=0.82, bottom=0.08, wspace=0.35)
     ax3d = fig.add_subplot(1, 2, 1, projection="3d")
     ax3d.set_facecolor(C_BG)
     ax_loss = fig.add_subplot(2, 2, 2)
     ax_scale = fig.add_subplot(2, 2, 4)
     for ax in [ax_loss, ax_scale]:
-        ax.set_facecolor(C_BG)
-        ax.tick_params(colors="#8b949e"); ax.xaxis.label.set_color("#8b949e"); ax.yaxis.label.set_color("#8b949e")
-        for sp in ax.spines.values(): sp.set_color("#30363d")
+        if _BRAND:
+            brand_axes(ax)
+        else:
+            ax.set_facecolor(C_BG)
+            ax.tick_params(colors="#8b949e")
+            ax.xaxis.label.set_color("#8b949e"); ax.yaxis.label.set_color("#8b949e")
+            for sp in ax.spines.values(): sp.set_color(grid_col)
+
+    if _BRAND:
+        sign = f"{data['delta']:+.6f}" if data.get("delta") is not None else "TBD"
+        add_brand_header(fig, "nanochat-GPT Transformer — KWT-NS gate",
+                         f"Δ val_bpb = {sign}  ·  12L × 6H × 768d  ·  H100 PCIe")
 
     def draw(fr):
         ax3d.cla()
         ax3d.set_facecolor(C_BG)
 
-        # Current KWT step and scale
         cur_kwt_step = kwt_steps[min(fr, len(kwt_steps) - 1)] if len(kwt_steps) > 0 else 0
         kwt_scale = scale_map.get(cur_kwt_step, 1.0)
-        active_layer = int(fr / max(n_frames - 1, 1) * N_LAYER)  # sweep effect
+        active_layer = int(fr / max(n_frames - 1, 1) * N_LAYER)
         kwt_active = kwt_scale > 1.001
 
-        # Edges (faint)
         for (l0, i0, l1, j0) in edges:
             p0, p1 = POS[l0][i0], POS[l1][j0]
-            alpha = 0.12
             ax3d.plot([p0[0], p1[0]], [p0[1], p1[1]], [p0[2], p1[2]],
-                      color=C_EDGE, alpha=alpha, lw=0.4)
+                      color=C_EDGE, alpha=0.15, lw=0.4)
 
-        # Neurons
         for li, P in enumerate(POS):
             is_act = (li == active_layer % N_LAYER)
             if kwt_active and is_act:
-                col = C_ACTIVE; sz = 80; alph = 0.98
+                col = C_ACTIVE; sz = 80; alph = 0.95
             elif is_act:
                 col = C_BASE; sz = 55; alph = 0.9
             else:
-                col = C_NEURON; sz = 28; alph = 0.55
-            ax3d.scatter(P[:, 0], P[:, 1], P[:, 2], c=col, s=sz, alpha=alph, depthshade=False, edgecolors="none")
+                col = C_NEURON; sz = 28; alph = 0.45
+            ax3d.scatter(P[:, 0], P[:, 1], P[:, 2], c=col, s=sz, alpha=alph,
+                         depthshade=False, edgecolors="none")
 
-        # Attention head indicator at active layer
         if kwt_active:
             lp = POS[active_layer % N_LAYER]
             ax3d.scatter(lp[:N_HEAD, 0], lp[:N_HEAD, 1], lp[:N_HEAD, 2],
@@ -160,51 +181,60 @@ def make_animation(data, out_dir):
         ax3d.set_axis_off()
         azim = (fr * 2.5) % 360
         ax3d.view_init(elev=22, azim=azim)
-        title_scale = f"  KWT scale={kwt_scale:.3f}" if kwt_active else ""
+        scale_tag = f"  KWT={kwt_scale:.3f}" if kwt_active else ""
         ax3d.set_title(
-            f"nanochat-GPT · 12L×6H×768d{title_scale}\n"
-            f"orange = KWT actif  bleu = attention  blanc = couche",
-            color="#c9d1d9", fontsize=8.5, pad=2,
+            f"12L×6H×768d{scale_tag}\ncoral=KWT actif  teal=attention",
+            color=txt_col, fontsize=8.5, pad=2,
         )
 
         # Loss curves
         ax_loss.cla()
-        ax_loss.set_facecolor(C_BG)
-        ax_loss.tick_params(colors="#8b949e"); ax_loss.xaxis.label.set_color("#8b949e"); ax_loss.yaxis.label.set_color("#8b949e")
-        for sp in ax_loss.spines.values(): sp.set_color("#30363d")
+        if _BRAND:
+            brand_axes(ax_loss)
+        else:
+            ax_loss.set_facecolor(C_BG)
+            ax_loss.tick_params(colors="#8b949e")
+            for sp in ax_loss.spines.values(): sp.set_color(grid_col)
         if len(base_steps) > 0:
             end = min(fr + 1, len(base_steps))
-            ax_loss.plot(base_steps[:end], base_losses[:end], color=C_BASE, lw=1.6, label="Baseline")
+            ax_loss.plot(base_steps[:end], base_losses[:end], color=C_BASE, lw=1.8, label="Baseline")
         if len(kwt_steps) > 0:
             end = min(fr + 1, len(kwt_steps))
-            ax_loss.plot(kwt_steps[:end], kwt_losses[:end], color=C_KWT, lw=1.6, label="+KWT", alpha=0.9)
+            ax_loss.plot(kwt_steps[:end], kwt_losses[:end], color=C_KWT, lw=1.8, label="+KWT-NS")
         ax_loss.set_ylim(y_lo, y_hi)
         ax_loss.set_ylabel("val_bpb proxy", fontsize=8)
-        ax_loss.set_title("val_bpb (proxy step-level)", color="#c9d1d9", fontsize=9)
-        ax_loss.legend(fontsize=8, facecolor="#161b22", labelcolor="#c9d1d9", edgecolor="#30363d")
+        ax_loss.set_title("val_bpb proxy (step-level)", color=txt_col, fontsize=9)
+        ax_loss.legend(fontsize=8)
 
         # KWT scale
         ax_scale.cla()
-        ax_scale.set_facecolor(C_BG)
-        ax_scale.tick_params(colors="#8b949e"); ax_scale.xaxis.label.set_color("#8b949e"); ax_scale.yaxis.label.set_color("#8b949e")
-        for sp in ax_scale.spines.values(): sp.set_color("#30363d")
+        if _BRAND:
+            brand_axes(ax_scale)
+        else:
+            ax_scale.set_facecolor(C_BG)
+            ax_scale.tick_params(colors="#8b949e")
+            for sp in ax_scale.spines.values(): sp.set_color(grid_col)
         if kwt_trace:
             t_steps = [x["step"] for x in kwt_trace]
             t_scale = [x.get("kwt_scale", 1.0) for x in kwt_trace]
             cur_t = min(fr + 1, len(t_steps))
-            ax_scale.plot(t_steps[:cur_t], t_scale[:cur_t], color=C_SCALE, lw=1.4)
-            ax_scale.axhline(1.0, color="#555", lw=0.8, ls="--")
+            ax_scale.fill_between(t_steps[:cur_t], 1.0, t_scale[:cur_t], alpha=0.2, color=C_SCALE)
+            ax_scale.plot(t_steps[:cur_t], t_scale[:cur_t], color=C_SCALE, lw=1.6)
+            ax_scale.axhline(1.0, color=grid_col, lw=0.8, ls="--")
             ax_scale.set_ylim(0.98, max(t_scale) * 1.02 if t_scale else 1.1)
         ax_scale.set_xlabel("step", fontsize=8)
         ax_scale.set_ylabel("KWT scale", fontsize=8)
-        ax_scale.set_title("KWT LR scale (1.0 = baseline)", color="#c9d1d9", fontsize=9)
+        ax_scale.set_title("KWT-NS LR scale (1.0 = baseline)", color=txt_col, fontsize=9)
 
         return []
 
     anim = animation.FuncAnimation(fig, draw, frames=n_frames, blit=False, interval=80)
     out = Path(out_dir) / "kwt_net3d_gpt.mp4"
     out.parent.mkdir(parents=True, exist_ok=True)
-    writer = animation.FFMpegWriter(fps=12, bitrate=2400)
+    writer = animation.FFMpegWriter(fps=12, bitrate=2400,
+        extra_args=["-pix_fmt", "yuv420p", "-profile:v", "baseline",
+                    "-movflags", "+faststart",
+                    "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2"])
     anim.save(str(out), writer=writer)
     print(f"VIDEO -> {out}")
     plt.close(fig)

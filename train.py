@@ -474,83 +474,69 @@ class MuonAdamW(torch.optim.Optimizer):
                 self._step_muon(group)
 
 # ---------------------------------------------------------------------------
-# KWT — Kelly-Weibull-Taguchi LR scale (couche ADDITIVE inter-batch)
-# IP interne BCUB3/POWWPOL — NE PAS DIFFUSER (conf. IMMUTABLE §6).
-# Spec figée : KWT-DRIFT-BENCH-ENRICH/RAPPORT.md · uid6 39aa5d
+# KWT-NS — Kelly-Weibull-Taguchi non-stationarity gate (brevet FR2513029, IP interne).
+# PRIMITIVE CANONIQUE inlinée depuis vault/scripts/kwt_ns.py (IP confidentielle —
+# NE PAS diffuser hors vault, cf. IMMUTABLE §6).
+# Gate fermée (scale=1.0) sur régime stationnaire. Ouverte (>1) sous dérive détectée.
+# Deadzone=0.6 : une descente monotone ou bruit symétrique ne déclenche PAS le gate.
 # ---------------------------------------------------------------------------
 
+from collections import deque as _deque
 import numpy as _np
 
-class KWTAdaptiveLR:
-    """Couche additive sur Muon/AdamW : scale LR = 1.0 + f*.
-    f* ∈ [0, κ=0.5] selon Kelly-Weibull-Taguchi.  Cold-start → scale=1.0.
-    """
-    N_WINDOW   = 50
-    REFIT_EVERY = 15
-    KAPPA       = 0.5   # half-Kelly
-    RELIABILITY = 0.76  # (1−α)(1−β) reliability cap
 
-    def __init__(self):
-        self._window = []
-        self._step   = 0
-        self._k      = 1.0
-        self._lam    = 1.0
-        self.last_f_star = 0.0
-        self.last_scale  = 1.0
+class KWTNonStationary:
+    def __init__(self, window: int = 30, max_boost: float = 0.3, min_hist: int = 12,
+                 deadzone: float = 0.6, smooth: int = 5):
+        self.hist = _deque(maxlen=max(window, min_hist))
+        self.window = window
+        self.max_boost = max_boost
+        self.min_hist = min_hist
+        self.deadzone = deadzone
+        self.smooth = max(1, smooth)
+        self.last_scale = 1.0
+        self.fit_fail = 0
+        self.n_boosted = 0
 
-    # -- Weibull 2-param via Weibull probability plot (log-linear regression) --
-    def _refit(self):
-        data = _np.array(self._window, dtype=_np.float64)
-        data = _np.maximum(data, 1e-8)
-        n    = len(data)
-        ds   = _np.sort(data)
-        idx  = _np.arange(1, n + 1, dtype=_np.float64)
-        F    = _np.clip((idx - 0.3) / (n + 0.4), 1e-8, 1 - 1e-8)  # Benard
-        Y    = _np.log(-_np.log(1.0 - F))                           # ln(-ln(1-F))
-        X    = _np.log(ds)
-        Xm, Ym = X.mean(), Y.mean()
-        sxx  = float(((X - Xm) ** 2).sum())
-        sxy  = float(((X - Xm) * (Y - Ym)).sum())
-        if sxx < 1e-12:
-            return
-        k   = max(0.1, sxy / sxx)
-        lam = max(1e-8, float(_np.exp(-(Ym - k * Xm) / k)))
-        self._k, self._lam = k, lam
+    @staticmethod
+    def _weibull_cdf(x, k, lam):
+        return 1.0 - _np.exp(-(_np.clip(x, 1e-6, None) / max(lam, 1e-3)) ** max(k, 0.3))
 
-    def _cdf(self, x: float) -> float:
-        import math
-        return 1.0 - math.exp(-(max(x, 1e-8) / self._lam) ** self._k)
-
-    def update(self, loss_val: float) -> float:
-        import math
-        self._window.append(float(loss_val))
-        if len(self._window) > self.N_WINDOW:
-            self._window.pop(0)
-        self._step += 1
-        # Cold-start guard — wait for minimal history
-        if len(self._window) < 10:
-            self.last_f_star = 0.0
-            self.last_scale  = 1.0
+    def scale(self) -> float:
+        if len(self.hist) < self.min_hist:
+            self.last_scale = 1.0
             return 1.0
-        # Periodic Weibull refit
-        if self._step % self.REFIT_EVERY == 0:
-            self._refit()
-        # p_weibull = P(X ≤ loss_current) — high ↔ current loss is abnormally high
-        p_wb = self._cdf(loss_val)
-        p    = p_wb * self.RELIABILITY
-        # Taguchi STB signal-to-noise ratio
-        win   = self._window
-        delta = sum(win) / len(win)
-        sigma = (sum((x - delta) ** 2 for x in win) / len(win)) ** 0.5
-        b     = delta / (delta + sigma + 1e-8)
-        # Kelly fraction (k annule, full-Kelly on b, then half-Kelly κ)
-        q      = 1.0 - p
-        f_raw  = (p * b - q) / (b + 1e-8)
-        f_star = max(0.0, min(f_raw * self.KAPPA, 1.0))
-        scale  = 1.0 + f_star
-        self.last_f_star = f_star
-        self.last_scale  = scale
-        return scale
+        w = _np.asarray(self.hist, dtype=float)
+        recent = float(_np.mean(w[-self.smooth:]))
+        try:
+            from scipy.optimize import curve_fit
+            p, _ = curve_fit(self._weibull_cdf, _np.sort(w),
+                             _np.linspace(0.02, 0.98, len(w)),
+                             p0=[1.5, w.mean() + 1e-3], maxfev=2000,
+                             bounds=([0.3, 1e-3], [6.0, 10 * w.mean() + 1.0]))
+            pw = float(self._weibull_cdf(recent, *p))
+        except Exception:
+            self.fit_fail += 1
+            pw = float(recent > _np.median(w))
+        if pw <= self.deadzone:
+            self.last_scale = 1.0
+            return 1.0
+        b = w.mean() / (w.mean() + w.std() + 1e-6)
+        q = 1.0 - pw
+        f = (pw * b - q) / (b + 1e-6)
+        f = float(_np.clip(f, 0.0, self.max_boost))
+        if f > 0:
+            self.n_boosted += 1
+        self.last_scale = 1.0 + f
+        return self.last_scale
+
+    def push(self, loss: float):
+        if loss == loss and abs(loss) < 1e6:
+            self.hist.append(float(loss))
+
+    def push_and_scale(self, loss: float) -> float:
+        self.push(loss)
+        return self.scale()
 
 
 # ---------------------------------------------------------------------------
@@ -647,10 +633,10 @@ optimizer = model.setup_optimizer(
 model = torch.compile(model, dynamic=False)
 
 # KWT controller (instantiated even when disabled so the variable always exists)
-kwt_controller = KWTAdaptiveLR()
+kwt_controller = KWTNonStationary()
 _kwt_log_fh    = open(KWT_LOG_PATH, "w") if KWT_ENABLED and KWT_LOG_PATH else None
 if KWT_ENABLED:
-    print(f"KWT_ENABLED=1  N_WINDOW={kwt_controller.N_WINDOW}  REFIT_EVERY={kwt_controller.REFIT_EVERY}  kappa={kwt_controller.KAPPA}")
+    print(f"KWT_ENABLED=1  window={kwt_controller.window}  deadzone={kwt_controller.deadzone}  smooth={kwt_controller.smooth}  max_boost={kwt_controller.max_boost}")
 
 train_loader = make_dataloader(tokenizer, DEVICE_BATCH_SIZE, MAX_SEQ_LEN, "train")
 x, y, epoch = next(train_loader)  # prefetch first batch
@@ -711,7 +697,7 @@ while True:
 
     # KWT additive LR scale — applied after base schedule, never below 1.0
     if KWT_ENABLED:
-        kwt_scale = kwt_controller.update(train_loss_f)
+        kwt_scale = kwt_controller.push_and_scale(train_loss_f)
         if kwt_scale > 1.0:
             for group in optimizer.param_groups:
                 group["lr"] *= kwt_scale
@@ -747,13 +733,14 @@ while True:
     if step % 50 == 0:
         print(f"\nval_bpb (step {step}): {debiased_smooth_loss:.6f}  (smooth training loss as proxy — final val_bpb logged after training loop)", flush=True)
         if KWT_ENABLED:
-            print(f"kwt (step {step}): scale={kwt_controller.last_scale:.4f}  f*={kwt_controller.last_f_star:.4f}  k={kwt_controller._k:.3f}  lam={kwt_controller._lam:.3f}", flush=True)
+            f_star_approx = max(0.0, kwt_controller.last_scale - 1.0)
+            print(f"kwt (step {step}): scale={kwt_controller.last_scale:.4f}  f*={f_star_approx:.4f}  boosted={kwt_controller.n_boosted}  fit_fail={kwt_controller.fit_fail}", flush=True)
         if _kwt_log_fh is not None:
             import json as _json
             _kwt_log_fh.write(_json.dumps({
                 "step": step, "loss": train_loss_f,
                 "lrm": lrm, "kwt_scale": kwt_controller.last_scale if KWT_ENABLED else 1.0,
-                "f_star": kwt_controller.last_f_star if KWT_ENABLED else 0.0,
+                "f_star": max(0.0, kwt_controller.last_scale - 1.0) if KWT_ENABLED else 0.0,
             }) + "\n")
             _kwt_log_fh.flush()
         # Patch 2026-05-14 — instrumentation chain rule sWELU
